@@ -1,0 +1,19 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.tsbuild/
+*.tsbuildinfo
+*.zip
+coverage/
+.vite/
+
+# 本地环境与运行日志
+.env
+.env.*
+!.env.example
+*.log
+
+# 本地工具与系统文件
+.omp/
+.DS_Store
+Thumbs.db

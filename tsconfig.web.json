@@ -1,0 +1,12 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+  "include": ["src/preload/**/*", "src/shared/**/*"],
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "./.tsbuild/web",
+    "rootDir": ".",
+    "types": ["@qwqnt/types/preload"],
+    "strict": true,
+    "skipLibCheck": true
+  }
+}

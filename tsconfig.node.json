@@ -1,0 +1,20 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+  "include": [
+    "vite.config.ts",
+    "src/main/**/*",
+    "src/shared/**/*",
+    "tests/**/*",
+    "scripts/**/*"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "outDir": "./.tsbuild/node",
+    "rootDir": ".",
+    "types": ["@qwqnt/types/main", "node", "vitest/globals"],
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true
+  }
+}

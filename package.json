@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/qwqnt-community/types/main/plugin.schema.json",
+  "name": "qwqnt-mcp",
+  "version": "0.1.0",
+  "description": "通过 MCP 为开发 Agent 提供 QQ 页面与 IPC 调试能力",
+  "type": "commonjs",
+  "scripts": {
+    "build": "vite build --config vite.config.ts --mode main && vite build --config vite.config.ts --mode preload",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --fix src",
+    "zip": "node scripts/pack.mjs",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "author": "MUKAPP",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "^5.2.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^2.0.0",
+    "@qwqnt/types": "github:qwqnt-community/types",
+    "@types/express": "^5.0.0",
+    "@types/node": "^26.1.1",
+    "electron": "^43.1.1",
+    "oxlint": "^1.74.0",
+    "typescript": "^5.9.2",
+    "unplugin-oxlint": "^0.8.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.0.8"
+  },
+  "packageManager": "pnpm@11.15.1",
+  "qwqnt": {
+    "name": "MCP 开发工具",
+    "inject": {
+      "main": "./dist/main/index.js",
+      "preload": "./dist/preload/index.cjs"
+    }
+  }
+}
