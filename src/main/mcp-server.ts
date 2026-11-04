@@ -36,6 +36,7 @@ const MAX_CAPTURE_WIDTH = 4_096
 const MAX_CAPTURE_HEIGHT = 4_096
 const MAX_CAPTURE_PIXELS = 16_777_216
 const MAX_CAPTURE_BYTES = 4_000_000
+const QQ_PAGE_SCOPE = '（仅用于 QQNT 客户端）'
 
 const pageIdSchema = z.number().int().nonnegative().describe('Electron BrowserWindow.id')
 const selectorSchema = z
@@ -241,7 +242,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     },
     {
       instructions:
-        '本服务专门用于检查和操作 QQ 桌面客户端页面。遇到 QQ 窗口、页面 DOM、截图、元素交互、页面网络/控制台日志或 IPC 调试任务时，优先使用本服务提供的工具，不要先使用通用浏览器或网页搜索工具。开始任务时如果尚未知道 pageId，先调用 list_pages；读取页面状态优先使用 get_page_html、query_selector、get_console_logs、list_network，只有没有专用工具时才使用 execute_javascript。执行点击、输入、键盘操作或 IPC 前先确认目标页面和参数。',
+        QQ_PAGE_SCOPE + ' 本服务专门用于检查和操作 QQ 桌面客户端页面。仅在任务目标为 QQ 时使用；不要为寻找普通浏览器或其他应用的页面而调用 list_pages。遇到 QQ 窗口、页面 DOM、截图、元素交互、页面网络/控制台日志或 IPC 调试任务时，优先使用本服务提供的工具，不要先使用通用浏览器或网页搜索工具。开始任务时如果尚未知道 pageId，先调用 list_pages；读取页面状态优先使用 get_page_html、query_selector、get_console_logs、list_network，只有没有专用工具时才使用 execute_javascript。执行点击、输入、键盘操作或 IPC 前先确认目标页面和参数。',
     },
   )
   const pageOperationTails = new Map<number, Promise<void>>()
@@ -269,7 +270,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     'list_pages',
     {
       title: '列出 QQ 页面',
-      description: '列出当前所有 QQ BrowserWindow 页面及其可见性、URL、IPC 就绪状态。',
+      description: `${QQ_PAGE_SCOPE} 列出当前所有 QQ BrowserWindow 页面及其可见性、URL、IPC 就绪状态。`,
       inputSchema: {},
       outputSchema: {
         pages: z.array(pageInfoSchema),
@@ -292,7 +293,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '读取页面 HTML',
       description:
-        `读取指定页面的实时 DOM HTML。可选 CSS selector；includeShadowDom 默认 true，将开放 ShadowRoot 序列化为 <template shadowrootmode="open">。页面脚本超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms，响应最多 ${MAX_HTML_CHARS} 个字符。`,
+        `${QQ_PAGE_SCOPE} 读取指定页面的实时 DOM HTML。可选 CSS selector；includeShadowDom 默认 true，将开放 ShadowRoot 序列化为 <template shadowrootmode="open">。页面脚本超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms，响应最多 ${MAX_HTML_CHARS} 个字符。`,
       inputSchema: {
         pageId: pageIdSchema,
         selector: selectorSchema.optional().describe('CSS 选择器；省略则序列化完整 document'),
@@ -347,7 +348,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '截取页面图像',
       description:
-        `截取指定 QQ 页面的当前画面并返回 PNG 图片。可选 rect 指定页面内矩形区域（CSS 像素）；宽高最多 ${MAX_CAPTURE_WIDTH}×${MAX_CAPTURE_HEIGHT}，总像素最多 ${MAX_CAPTURE_PIXELS}。截图超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms。`,
+        `${QQ_PAGE_SCOPE} 截取指定 QQ 页面的当前画面并返回 PNG 图片。可选 rect 指定页面内矩形区域（CSS 像素）；宽高最多 ${MAX_CAPTURE_WIDTH}×${MAX_CAPTURE_HEIGHT}，总像素最多 ${MAX_CAPTURE_PIXELS}。截图超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms。`,
       inputSchema: {
         pageId: pageIdSchema,
         rect: captureRectSchema.optional().describe('可选截图区域，坐标和尺寸使用 CSS 像素'),
@@ -442,7 +443,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '查询页面元素',
       description:
-        `查询 CSS 选择器对应元素的存在性、文本、属性、boundingClientRect、可见性与可用状态。all=true 时最多返回 50 个匹配；页面脚本超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms。`,
+        `${QQ_PAGE_SCOPE} 查询 CSS 选择器对应元素的存在性、文本、属性、boundingClientRect、可见性与可用状态。all=true 时最多返回 50 个匹配；页面脚本超时默认 ${DEFAULT_JS_TIMEOUT_MS} ms。`,
       inputSchema: {
         pageId: pageIdSchema,
         selector: selectorSchema,
@@ -477,7 +478,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '点击页面元素',
       description:
-        '对 CSS 选择器命中的首个元素执行页面内合成点击（先 scrollIntoView），不是系统级真实鼠标输入。button 默认 left；clickCount 默认 1。',
+        `${QQ_PAGE_SCOPE} 对 CSS 选择器命中的首个元素执行页面内合成点击（先 scrollIntoView），不是系统级真实鼠标输入。button 默认 left；clickCount 默认 1。`,
       inputSchema: {
         pageId: pageIdSchema,
         selector: selectorSchema,
@@ -524,7 +525,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '向元素输入文本',
       description:
-        `向 CSS 选择器命中的 input、textarea 或 contenteditable 元素输入文本。clear 默认 true；submit=true 时追加 Enter 并尝试 requestSubmit。文本最多 ${MAX_TEXT_LENGTH} 个字符；操作使用页面内合成事件。`,
+        `${QQ_PAGE_SCOPE} 向 CSS 选择器命中的 input、textarea 或 contenteditable 元素输入文本。clear 默认 true；submit=true 时追加 Enter 并尝试 requestSubmit。文本最多 ${MAX_TEXT_LENGTH} 个字符；操作使用页面内合成事件。`,
       inputSchema: {
         pageId: pageIdSchema,
         selector: selectorSchema,
@@ -563,7 +564,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '发送按键',
       description:
-        '向页面发送键盘合成事件。可选 selector 先聚焦目标；modifiers 支持 ctrl/alt/shift/meta。不是系统级真实键盘输入。',
+        `${QQ_PAGE_SCOPE} 向页面发送键盘合成事件。可选 selector 先聚焦目标；modifiers 支持 ctrl/alt/shift/meta。不是系统级真实键盘输入。`,
       inputSchema: {
         pageId: pageIdSchema,
         key: z.string().min(1).max(64).describe('如 Enter、Escape、a、Tab'),
@@ -605,7 +606,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '等待页面条件',
       description:
-        `轮询等待条件成立。可指定 selector（可选要求可见）、urlIncludes、expression（会在页面执行代码）。timeoutMs 默认 ${DEFAULT_WAIT_TIMEOUT_MS}，最大 ${MAX_WAIT_TIMEOUT_MS}。expression 可能产生副作用，因此该工具不标记为只读。`,
+        `${QQ_PAGE_SCOPE} 轮询等待条件成立。可指定 selector（可选要求可见）、urlIncludes、expression（会在页面执行代码）。timeoutMs 默认 ${DEFAULT_WAIT_TIMEOUT_MS}，最大 ${MAX_WAIT_TIMEOUT_MS}。expression 可能产生副作用，因此该工具不标记为只读。`,
       inputSchema: {
         pageId: pageIdSchema,
         selector: selectorSchema.optional(),
@@ -669,7 +670,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '读取页面控制台日志',
       description:
-        '读取主进程缓冲的页面 console / 加载失败日志。可按 pageId、level、after 过滤；单条内容已截断；limit 默认 100；clear=true 时消费已返回条目。',
+        `${QQ_PAGE_SCOPE} 读取主进程缓冲的页面 console / 加载失败日志。可按 pageId、level、after 过滤；单条内容已截断；limit 默认 100；clear=true 时消费已返回条目。`,
       inputSchema: {
         pageId: pageIdSchema.optional().describe('可选 BrowserWindow.id；省略则读取所有页面'),
         level: z.enum(['debug', 'info', 'warning', 'error', 'unknown']).optional().describe('日志级别'),
@@ -723,7 +724,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '列出最近网络请求摘要',
       description:
-        '读取主进程缓冲的最近网络请求摘要（URL/method/status/resourceType，不含 body）。URL 默认移除 query 和 fragment；支持 after cursor；limit 默认 100；clear=true 时消费已返回条目。',
+        `${QQ_PAGE_SCOPE} 读取主进程缓冲的最近网络请求摘要（URL/method/status/resourceType，不含 body）。URL 默认移除 query 和 fragment；支持 after cursor；limit 默认 100；clear=true 时消费已返回条目。`,
       inputSchema: {
         pageId: pageIdSchema.optional().describe('可选 BrowserWindow.id；省略则读取所有页面'),
         after: z.number().int().nonnegative().optional().describe('只返回 sequence 大于此值的新请求'),
@@ -773,7 +774,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '在页面执行 JavaScript',
       description:
-        `在指定页面全局上下文执行 JavaScript 表达式并返回结果。默认不授予 user gesture；禁止执行无限循环。超时只停止 MCP 等待，无法取消已经进入 renderer 的脚本。timeoutMs 默认 ${DEFAULT_JS_TIMEOUT_MS}，范围 ${MIN_JS_TIMEOUT_MS}–${MAX_JS_TIMEOUT_MS}；表达式最多 ${MAX_EXPRESSION_LENGTH} 个字符。`,
+        `${QQ_PAGE_SCOPE} 在指定页面全局上下文执行 JavaScript 表达式并返回结果。默认不授予 user gesture；禁止执行无限循环。超时只停止 MCP 等待，无法取消已经进入 renderer 的脚本。timeoutMs 默认 ${DEFAULT_JS_TIMEOUT_MS}，范围 ${MIN_JS_TIMEOUT_MS}–${MAX_JS_TIMEOUT_MS}；表达式最多 ${MAX_EXPRESSION_LENGTH} 个字符。`,
       inputSchema: {
         pageId: pageIdSchema,
         expression: z
@@ -820,7 +821,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     {
       title: '从渲染进程发送 IPC',
       description:
-        `从目标 QQ 渲染进程调用 Electron ipcRenderer.send 或 ipcRenderer.invoke（mode 默认 send）。不是主进程向页面广播。拒绝保留通道 qwqnt-mcp:*；channel 最多 ${MAX_CHANNEL_LENGTH} 个字符，args 最多 ${MAX_IPC_ARGS} 项。send 返回 {ok:true,sent:true}，invoke 返回 {ok:true,valueType,value}。`,
+        `${QQ_PAGE_SCOPE} 从目标 QQ 渲染进程调用 Electron ipcRenderer.send 或 ipcRenderer.invoke（mode 默认 send）。不是主进程向页面广播。拒绝保留通道 qwqnt-mcp:*；channel 最多 ${MAX_CHANNEL_LENGTH} 个字符，args 最多 ${MAX_IPC_ARGS} 项。send 返回 {ok:true,sent:true}，invoke 返回 {ok:true,valueType,value}。`,
       inputSchema: {
         pageId: pageIdSchema,
         channel: z
