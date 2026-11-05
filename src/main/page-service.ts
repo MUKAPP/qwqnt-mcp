@@ -1,7 +1,10 @@
+import { CHANNEL_PING_READY } from '../shared/ipc'
 import {
   parseConsoleMessageArgs,
   type PageObservability,
 } from './page-observability'
+import { buildPageScript, pageErrorReturn, PAGE_NORMALIZE_SOURCE } from './page-script'
+import { ToolError } from './tool-error'
 
 
 /** 窄接口：仅依赖 id / webContents 所需方法，便于 Vitest 注入伪窗口 */
@@ -108,7 +111,7 @@ const VOID_ELEMENTS = new Set([
 export function buildSerializeHtmlScript(selector: string | undefined, includeShadowDom: boolean): string {
   const selectorLiteral = JSON.stringify(selector ?? null)
   const includeShadowLiteral = JSON.stringify(includeShadowDom)
-  return `(() => {
+  return buildPageScript(`
     const selector = ${selectorLiteral};
     const includeShadowDom = ${includeShadowLiteral};
     const VOID_ELEMENTS = new Set(${JSON.stringify([...VOID_ELEMENTS])});
@@ -180,25 +183,26 @@ export function buildSerializeHtmlScript(selector: string | undefined, includeSh
 
     const target = document.querySelector(selector);
     if (!target) {
-      return { __qwqntMcpError: '页面中未找到选择器：' + selector };
+      ${pageErrorReturn('ELEMENT_NOT_FOUND', "'页面中未找到选择器：' + selector")}
     }
     return serializeNode(target);
-  })()`
+  `)
 }
 
 /**
  * 在页面上下文执行表达式的包装器。expression 经 JSON.stringify 嵌入。
+ * 结果在页面内归一化（DOM、Date、Map 等 Electron 无法直接回传的值），
+ * 返回 { __qwqntMcpValueType, __qwqntMcpValue }。
  */
 export function buildEvalScript(expression: string): string {
   const exprLiteral = JSON.stringify(expression)
-  return `(() => {
+  return buildPageScript(`
     const __expr = ${exprLiteral};
     const __indirectEval = eval;
-    return (async () => {
-      const result = __indirectEval(__expr);
-      return await result;
-    })();
-  })()`
+    const __result = await __indirectEval(__expr);
+${PAGE_NORMALIZE_SOURCE}
+    return __qwqntMcpNormalize(__result);
+  `)
 }
 
 export function createPageService(deps: PageServiceDeps): PageService {
@@ -334,9 +338,18 @@ export function createPageService(deps: PageServiceDeps): PageService {
     win.on('closed', onDestroyed)
     on('destroyed', onDestroyed)
     on('render-process-gone', onGone)
-    // 仅在完整文档加载开始时清除 ready；SPA/hash 导航不卸载 preload
+    // 加载开始时清除 ready（SPA/hash 导航不触发）。子帧加载也会触发该事件，
+    // 而 preload 并未卸载，因此加载结束后若仍未就绪，主动请求 preload 重新报告。
     on('did-start-loading', () => {
       ipcReadyWebContents.delete(wcId)
+    })
+    on('did-stop-loading', () => {
+      if (disposed || ipcReadyWebContents.has(wcId) || wc.isDestroyed()) return
+      try {
+        wc.send(CHANNEL_PING_READY)
+      } catch {
+        // 页面正在销毁时发送失败，等待下一次加载或 preload 自行报告
+      }
     })
 
     attachObservability(win, on)
@@ -385,7 +398,7 @@ export function createPageService(deps: PageServiceDeps): PageService {
     requirePage(pageId: number): PageWindow {
       const win = deps.getAllWindows().find((w) => w.id === pageId && !w.isDestroyed())
       if (!win) {
-        throw new Error(`未找到页面：${pageId}`)
+        throw new ToolError('PAGE_NOT_FOUND', `未找到页面：${pageId}`)
       }
       registerWindow(win)
       return win

@@ -318,7 +318,10 @@ node scripts/smoke.mjs --url http://127.0.0.1:18765/mcp --token <token>
 - 表达式最多 100000 个字符，经 `JSON.stringify` 嵌入固定包装器，再用间接 `eval` 执行
 - 默认不授予 Electron `userGesture`
 - **禁止无限循环**；超时只能停止 MCP 等待，无法中断已进入页面的脚本
+- 支持返回 Promise，等待其结果
+- 结果在页面内归一化：DOM 节点 → `{ nodeName, outerHTML }`，`Date` → ISO 字符串，`Map` → 键值对数组，`Set`/`NodeList` → 数组，函数、`bigint`、`symbol` → 字符串，循环引用 → `"[Circular]"`
 - 结果限制最大深度、条目数和字符串长度；超出响应大小时返回 `OUTPUT_LIMIT`
+- 表达式抛错或有语法错误时返回 `SCRIPT_ERROR`，消息包含原始错误名称和内容
 - 返回 `{ pageId, valueType, value }`
 
 ### `send_ipc`
@@ -340,6 +343,7 @@ node scripts/smoke.mjs --url http://127.0.0.1:18765/mcp --token <token>
 - 拒绝空 channel，以及任何 `qwqnt-mcp:` 保留通道
 - `send` 返回 `result: { ok: true, sent: true }`
 - `invoke` 返回 `result: { ok: true, valueType, value }`
+- 渲染进程侧 `send`/`invoke` 失败（如通道没有 handler）返回 `IPC_ERROR`，消息包含 Electron 的原始错误
 - 目标未加载 preload：`目标页面尚未加载 QwQNT MCP preload，无法发送 IPC`
 
 失败工具会同时返回 `isError: true`、文本说明和 `structuredContent.error`：
@@ -352,13 +356,15 @@ node scripts/smoke.mjs --url http://127.0.0.1:18765/mcp --token <token>
 }
 ```
 
-常见 code：`PAGE_NOT_FOUND`、`ELEMENT_NOT_FOUND`、`TIMEOUT`、`PAGE_NOT_READY`、`INVALID_ARGUMENT`、`OUTPUT_LIMIT`、`SCRIPT_ERROR`、`IPC_ERROR`、`INTERNAL_ERROR`。
+常见 code：`PAGE_NOT_FOUND`、`ELEMENT_NOT_FOUND`、`TIMEOUT`、`PAGE_NOT_READY`、`INVALID_ARGUMENT`、`OUTPUT_LIMIT`、`SCRIPT_ERROR`、`IPC_ERROR`、`INTERNAL_ERROR`。`TIMEOUT` 与 `PAGE_NOT_READY` 的 `retryable` 为 `true`；`INTERNAL_ERROR` 的消息附带原始错误内容。
 
 ### 页面操作限制
 
 - `click`、`type_text`、`press_key` 使用页面内合成事件，`event.isTrusted` 不为 true，不等同系统级鼠标或键盘输入。
-- `type_text` 仅支持 `input`、`textarea` 和 `contenteditable`。
-- 同一页面的写操作会串行执行，避免并发点击、输入和按键互相覆盖。
+- `type_text` 仅支持 `input`、`textarea` 和 `contenteditable`。contenteditable 通过浏览器编辑命令（`execCommand('insertText')`）输入，QQ 的 ProseMirror 输入框可保留多行文本的换行。
+- QQ 发送快捷键按用户设置而定：设为 Ctrl+Enter 时用 `press_key`（`key: "Enter"`, `modifiers: ["ctrl"]`）发送，单独 Enter 只换行；也可以点击发送按钮。
+- `wait_for.expression` 返回 Promise 时等待其结果再判断真值。
+- 同一页面的写操作（`click`、`type_text`、`press_key`、`execute_javascript`、`send_ipc`）在所有 MCP 请求之间串行执行，避免并发点击、输入和按键互相覆盖。
 - `wait_for.expression` 和 `execute_javascript` 可以修改页面状态，不应当视为只读操作。
 
 推荐调用顺序：
@@ -379,6 +385,7 @@ node scripts/smoke.mjs --url http://127.0.0.1:18765/mcp --token <token>
 - `send_ipc` 可调用目标渲染进程的非保留 IPC 通道，请只给受信任的本机 Agent
 - 网络摘要默认移除 URL query/fragment，console、URL、脚本结果和 IPC 参数均有大小限制
 - 单个 MCP 服务最多同时处理 32 个请求；繁忙时返回 HTTP 503
+- 请求体最多 4 MiB，超出返回 HTTP 413 与 JSON-RPC 错误
 - 不提供关闭认证或绑定 `0.0.0.0` 的配置
 
 ## 目录结构
@@ -399,7 +406,7 @@ dist/          构建产物（QwQNT inject）
 - main 打包 `@modelcontextprotocol/sdk`、`express`、`zod`；只 externalize `electron` 与 Node 内置模块
 - 不依赖 `qwqnt-ipc-interceptor`（AGPL）；主动发包由本插件 preload 完成
 - 窗口来源：`BrowserWindow.getAllWindows()` + `qwqnt.main.hooks.whenBrowserWindowCreated.peek`
-- SPA / hash 导航不会卸载 preload，因此不会误清 `ipcReady`；完整文档重新加载时会清 ready
+- SPA / hash 导航不会卸载 preload，因此不会误清 `ipcReady`；加载开始（`did-start-loading`）时清除 ready，加载结束后若仍未就绪，主进程通过保留通道请求 preload 重新报告，子帧加载不会让 `ipcReady` 长期为 false
 - `tsc -b` 输出到 `.tsbuild/`，不要在 `src/` 旁生成 `.js`
 
 ## 故障排查
@@ -415,6 +422,7 @@ dist/          构建产物（QwQNT inject）
 | JS/页面操作超时 | 页面脚本过慢或 renderer 无响应 | `timeoutMs` 只能停止 MCP 等待，不能中断已进入页面的脚本；不要运行无限循环 |
 | `OUTPUT_LIMIT` | HTML、脚本结果、截图或 IPC 参数过大 | 缩小 selector/结果/截图区域或拆分调用 |
 | HTTP 503 | MCP 并发请求达到 32 个 | 等待已有请求完成后重试 |
+| HTTP 413 | 请求体超过 4 MiB | 缩短表达式、文本或 IPC 参数 |
 
 ## License
 

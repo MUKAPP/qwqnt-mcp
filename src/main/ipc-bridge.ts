@@ -10,6 +10,7 @@ import {
 } from '../shared/ipc'
 import { normalizeValue } from '../shared/serialize'
 import type { PageService } from './page-service'
+import { ToolError } from './tool-error'
 export const IPC_DISPATCH_TIMEOUT_MS = 10_000
 export const MAX_IPC_ARGS = 64
 export const MAX_IPC_ARGS_BYTES = 1_000_000
@@ -89,8 +90,7 @@ export function createIpcBridge(pageService: PageService, ipcMain: IpcMainLike):
     }
 
     const err = result.error
-    const error = new Error(err?.message || 'IPC 调用失败')
-    if (err?.name) error.name = err.name
+    const error = new ToolError('IPC_ERROR', `IPC 调用失败：${err?.message || '未知错误'}`)
     if (err?.stack) error.stack = err.stack
     entry.reject(error)
   }
@@ -104,34 +104,34 @@ export function createIpcBridge(pageService: PageService, ipcMain: IpcMainLike):
   ): Promise<unknown> {
     const channel = options.channel
     if (!channel || typeof channel !== 'string' || channel.trim() === '') {
-      throw new Error('channel 不能为空')
+      throw new ToolError('INVALID_ARGUMENT', 'channel 不能为空')
     }
     if (channel.length > 256) {
-      throw new Error('channel 超过长度限制')
+      throw new ToolError('INVALID_ARGUMENT', 'channel 超过长度限制')
     }
     if (isReservedChannel(channel)) {
-      throw new Error(`拒绝使用保留通道：${channel}`)
+      throw new ToolError('INVALID_ARGUMENT', `拒绝使用保留通道：${channel}`)
     }
 
     const win = pageService.requirePage(pageId)
 
     if (!pageService.isIpcReady(pageId)) {
-      throw new Error('目标页面尚未加载 QwQNT MCP preload，无法发送 IPC')
+      throw new ToolError('PAGE_NOT_READY', '目标页面尚未加载 QwQNT MCP preload，无法发送 IPC')
     }
 
     const mode: IpcDispatchMode = options.mode === 'invoke' ? 'invoke' : 'send'
     const args = options.args ?? []
     if (args.length > MAX_IPC_ARGS) {
-      throw new Error(`IPC 参数不能超过 ${MAX_IPC_ARGS} 项`)
+      throw new ToolError('INVALID_ARGUMENT', `IPC 参数不能超过 ${MAX_IPC_ARGS} 项`)
     }
 
     try {
       structuredClone(args)
     } catch {
-      throw new Error('IPC 参数无法进行 structured clone')
+      throw new ToolError('INVALID_ARGUMENT', 'IPC 参数无法进行 structured clone')
     }
     if (estimateStructuredCloneSize(args) > MAX_IPC_ARGS_BYTES) {
-      throw new Error(`IPC 参数超过大小限制：${MAX_IPC_ARGS_BYTES} bytes`)
+      throw new ToolError('INVALID_ARGUMENT', `IPC 参数超过大小限制：${MAX_IPC_ARGS_BYTES} bytes`)
     }
 
     const requestId = randomUUID()
@@ -147,7 +147,7 @@ export function createIpcBridge(pageService: PageService, ipcMain: IpcMainLike):
     const value = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(requestId)
-        reject(new Error(`操作超时（${IPC_DISPATCH_TIMEOUT_MS} ms）`))
+        reject(new ToolError('TIMEOUT', `操作超时（${IPC_DISPATCH_TIMEOUT_MS} ms）`))
       }, IPC_DISPATCH_TIMEOUT_MS)
 
       pending.set(requestId, {
@@ -161,14 +161,14 @@ export function createIpcBridge(pageService: PageService, ipcMain: IpcMainLike):
         if (win.isDestroyed() || win.webContents.isDestroyed()) {
           clearTimeout(timer)
           pending.delete(requestId)
-          reject(new Error(`未找到页面：${pageId}`))
+          reject(new ToolError('PAGE_NOT_FOUND', `未找到页面：${pageId}`))
           return
         }
         win.webContents.send(CHANNEL_DISPATCH, request)
       } catch (err) {
         clearTimeout(timer)
         pending.delete(requestId)
-        reject(err instanceof Error ? err : new Error(String(err)))
+        reject(new ToolError('IPC_ERROR', `IPC 调用失败：${err instanceof Error ? err.message : String(err)}`))
       }
     })
 
@@ -183,7 +183,7 @@ export function createIpcBridge(pageService: PageService, ipcMain: IpcMainLike):
     dispose(): void {
       for (const [, entry] of pending) {
         clearTimeout(entry.timer)
-        entry.reject(new Error('IPC bridge 已关闭'))
+        entry.reject(new ToolError('IPC_ERROR', 'IPC bridge 已关闭'))
       }
       pending.clear()
       ipcMain.removeListener?.(CHANNEL_PRELOAD_READY, onReady as (...args: unknown[]) => void)

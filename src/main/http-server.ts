@@ -1,13 +1,19 @@
 import { createServer, type Server as HttpServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
-import type { Request, Response, NextFunction } from 'express'
-import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js'
+import express, { type Request, type Response, type NextFunction } from 'express'
+import { localhostHostValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { McpConfig } from './config'
 import type { IpcBridge } from './ipc-bridge'
 import type { PageService } from './page-service'
-import { createMcpServer } from './mcp-server'
+import { createMcpServer, createPageOperationQueue } from './mcp-server'
+
+/**
+ * JSON 请求体上限。工具参数允许 10 万字符的文本/表达式（中文按 UTF-8 最多约 300 KB）
+ * 和 1 MB 的 IPC 参数，JSON 转义还会放大体积，因此留出余量。
+ */
+export const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024
 
 export interface HttpServerHandle {
   port: number
@@ -38,6 +44,14 @@ function methodNotAllowed(res: Response): void {
   )
 }
 
+function jsonRpcError(res: Response, status: number, code: number, message: string): void {
+  res.status(status).json({
+    jsonrpc: '2.0',
+    error: { code, message },
+    id: null,
+  })
+}
+
 function tokensEqual(expected: string, provided: string): boolean {
   const a = Buffer.from(expected, 'utf8')
   const b = Buffer.from(provided, 'utf8')
@@ -62,8 +76,11 @@ export async function startMcpHttpServer(
   pageService: PageService,
   ipcBridge: IpcBridge,
 ): Promise<HttpServerHandle> {
-  const app = createMcpExpressApp({ host: '127.0.0.1' })
+  const app = express()
+  // 与 SDK createMcpExpressApp 相同的 DNS rebinding 防护：只接受本机 Host
+  app.use(localhostHostValidation())
   const active = new Set<ActiveSession>()
+  const operationQueue = createPageOperationQueue()
   const MAX_ACTIVE_REQUESTS = 32
   let activeRequests = 0
 
@@ -91,6 +108,21 @@ export async function startMcpHttpServer(
     next()
   })
 
+  // 认证通过后再解析请求体，避免未认证请求占用解析开销
+  app.use('/mcp', express.json({ limit: MAX_REQUEST_BODY_BYTES }))
+  app.use('/mcp', (error: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const type = error && typeof error === 'object' && 'type' in error ? error.type : undefined
+    if (type === 'entity.too.large') {
+      jsonRpcError(res, 413, -32600, `请求体超过大小限制：${MAX_REQUEST_BODY_BYTES} bytes`)
+      return
+    }
+    if (type === 'entity.parse.failed') {
+      jsonRpcError(res, 400, -32700, 'Parse error: 请求体不是合法 JSON')
+      return
+    }
+    next(error)
+  })
+
   app.post('/mcp', async (req: Request, res: Response) => {
     if (activeRequests >= MAX_ACTIVE_REQUESTS) {
       res.status(503).json({
@@ -102,7 +134,7 @@ export async function startMcpHttpServer(
     }
 
     activeRequests += 1
-    const server = createMcpServer(pageService, ipcBridge)
+    const server = createMcpServer(pageService, ipcBridge, operationQueue)
     let cleaned = false
     let session: ActiveSession | undefined
     const cleanup = (): void => {

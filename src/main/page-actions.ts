@@ -1,7 +1,9 @@
 /**
  * 页面交互脚本构建器。
  * selector / text / key 等一律 JSON.stringify 嵌入，禁止字符串拼接。
+ * 脚本体经 buildPageScript 包装：页面内异常以结构化错误返回，不会丢失原始消息。
  */
+import { buildPageScript, pageErrorReturn } from './page-script'
 
 export type MouseButton = 'left' | 'middle' | 'right'
 
@@ -30,11 +32,13 @@ export interface ElementInfo {
   enabled?: boolean
 }
 
+const ELEMENT_NOT_FOUND_RETURN = pageErrorReturn('ELEMENT_NOT_FOUND', "'页面中未找到选择器：' + selector")
+
 /** 查询元素信息（exists/text/rect/可见性等） */
 export function buildQuerySelectorScript(selector: string, all: boolean): string {
   const selectorLiteral = JSON.stringify(selector)
   const allLiteral = JSON.stringify(all)
-  return `(() => {
+  return buildPageScript(`
     const selector = ${selectorLiteral};
     const all = ${allLiteral};
 
@@ -100,7 +104,7 @@ export function buildQuerySelectorScript(selector: string, all: boolean): string
     const info = describe(nodes[0]);
     info.count = nodes.length;
     return info;
-  })()`
+  `)
 }
 
 /** 点击元素 */
@@ -111,13 +115,13 @@ export function buildClickScript(
   const selectorLiteral = JSON.stringify(selector)
   const buttonLiteral = JSON.stringify(options.button ?? 'left')
   const clickCountLiteral = JSON.stringify(options.clickCount ?? 1)
-  return `(() => {
+  return buildPageScript(`
     const selector = ${selectorLiteral};
     const button = ${buttonLiteral};
     const clickCount = ${clickCountLiteral};
     const el = document.querySelector(selector);
     if (!el) {
-      return { __qwqntMcpError: '页面中未找到选择器：' + selector };
+      ${ELEMENT_NOT_FOUND_RETURN}
     }
     if (typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -162,7 +166,7 @@ export function buildClickScript(
         top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right,
       },
     };
-  })()`
+  `)
 }
 
 /** 在元素上输入文本 */
@@ -175,14 +179,14 @@ export function buildTypeTextScript(
   const textLiteral = JSON.stringify(text)
   const clearLiteral = JSON.stringify(options.clear !== false)
   const submitLiteral = JSON.stringify(options.submit === true)
-  return `(() => {
+  return buildPageScript(`
     const selector = ${selectorLiteral};
     const text = ${textLiteral};
     const clear = ${clearLiteral};
     const submit = ${submitLiteral};
     const el = document.querySelector(selector);
     if (!el) {
-      return { __qwqntMcpError: '页面中未找到选择器：' + selector };
+      ${ELEMENT_NOT_FOUND_RETURN}
     }
     if (typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -194,30 +198,42 @@ export function buildTypeTextScript(
     const isTextInput = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
     const isEditable = isTextInput || el.isContentEditable;
     if (!isEditable) {
-      return { __qwqntMcpError: '目标元素不可编辑：仅支持 input、textarea 或 contenteditable' };
-    }
-    const proto = el instanceof HTMLTextAreaElement
-      ? window.HTMLTextAreaElement.prototype
-      : window.HTMLInputElement.prototype;
-    const valueSetter = isTextInput ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : undefined;
-
-    if (clear) {
-      if (valueSetter) valueSetter.call(el, '');
-      else el.textContent = '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      ${pageErrorReturn('INVALID_ARGUMENT', "'目标元素不可编辑：仅支持 input、textarea 或 contenteditable'")}
     }
 
     if (el.isContentEditable) {
-      if (clear) el.textContent = '';
-      el.textContent = (el.textContent || '') + text;
-    } else if (valueSetter) {
-      valueSetter.call(el, clear ? text : String(el.value || '') + text);
+      // 富文本编辑器（如 QQ 的 ProseMirror）只认浏览器编辑命令；直接改 DOM 会被编辑器重写，换行丢失。
+      let inserted = false;
+      const selection = window.getSelection();
+      if (typeof document.execCommand === 'function' && selection) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        if (!clear) range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        if (clear) document.execCommand('delete');
+        inserted = text === '' || document.execCommand('insertText', false, text);
+      }
+      if (!inserted) {
+        el.textContent = (clear ? '' : el.textContent || '') + text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+      }
     } else {
-      return { __qwqntMcpError: '目标元素不可编辑' };
+      const proto = el instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (!valueSetter) {
+        ${pageErrorReturn('INVALID_ARGUMENT', "'目标元素不可编辑'")}
+      }
+      if (clear) {
+        valueSetter.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      valueSetter.call(el, clear ? text : String(el.value || '') + text);
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-
 
     if (submit) {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
@@ -231,9 +247,9 @@ export function buildTypeTextScript(
     return {
       ok: true,
       selector,
-      value: 'value' in el ? el.value : (el.textContent || ''),
+      value: isTextInput ? el.value : (el.innerText || el.textContent || ''),
     };
-  })()`
+  `)
 }
 
 /** 按键；可选先 focus selector */
@@ -244,13 +260,13 @@ export function buildPressKeyScript(
   const keyLiteral = JSON.stringify(key)
   const selectorLiteral = JSON.stringify(options.selector ?? null)
   const modifiersLiteral = JSON.stringify(options.modifiers ?? [])
-  return `(() => {
+  return buildPageScript(`
     const key = ${keyLiteral};
     const selector = ${selectorLiteral};
     const modifiers = ${modifiersLiteral};
     let el = selector ? document.querySelector(selector) : document.activeElement;
     if (selector && !el) {
-      return { __qwqntMcpError: '页面中未找到选择器：' + selector };
+      ${ELEMENT_NOT_FOUND_RETURN}
     }
     if (!el) el = document.body;
     if (typeof el.focus === 'function') {
@@ -281,12 +297,12 @@ export function buildPressKeyScript(
     el.dispatchEvent(new KeyboardEvent('keypress', init));
     el.dispatchEvent(new KeyboardEvent('keyup', init));
     return { ok: true, key, selector: selector || null };
-  })()`
+  `)
 }
 
 /**
  * 等待条件脚本：返回 true/false。
- * 支持 selector 出现、URL 包含、自定义 expression（间接 eval 为真）。
+ * 支持 selector 出现、URL 包含、自定义 expression（间接 eval，等待 Promise 结果后判断真值）。
  */
 export function buildWaitConditionScript(options: {
   selector?: string
@@ -298,7 +314,7 @@ export function buildWaitConditionScript(options: {
   const urlIncludesLiteral = JSON.stringify(options.urlIncludes ?? null)
   const expressionLiteral = JSON.stringify(options.expression ?? null)
   const visibleLiteral = JSON.stringify(options.visible === true)
-  return `(() => {
+  return buildPageScript(`
     const selector = ${selectorLiteral};
     const urlIncludes = ${urlIncludesLiteral};
     const expression = ${expressionLiteral};
@@ -319,9 +335,9 @@ export function buildWaitConditionScript(options: {
     }
     if (expression != null && expression !== '') {
       const __indirectEval = eval;
-      const result = __indirectEval(expression);
+      const result = await __indirectEval(expression);
       if (!result) return false;
     }
     return true;
-  })()`
+  `)
 }

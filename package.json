@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/qwqnt-community/types/main/plugin.schema.json",
   "name": "qwqnt-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "通过 MCP 为开发 Agent 提供 QQ 页面与 IPC 调试能力",
   "type": "commonjs",
   "scripts": {

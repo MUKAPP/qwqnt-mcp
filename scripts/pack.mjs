@@ -9,7 +9,7 @@
  *   - dist/（构建产物）
  *
  * 纯 Node 实现（store 模式，无压缩），不依赖外部工具。
- * 用法：先 pnpm run build，再 pnpm pack。
+ * 用法：先 pnpm run build，再 pnpm zip。
  */
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'

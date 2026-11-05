@@ -2,6 +2,7 @@ import { ipcRenderer } from 'electron'
 import {
   CHANNEL_DISPATCH,
   CHANNEL_DISPATCH_RESULT,
+  CHANNEL_PING_READY,
   CHANNEL_PRELOAD_READY,
   type IpcDispatchRequest,
   type IpcDispatchResult,
@@ -129,6 +130,9 @@ function announceReady(): void {
 }
 
 announceReady()
+ipcRenderer.on(CHANNEL_PING_READY, () => {
+  announceReady()
+})
 let readyRetries = 0
 const readyTimer = setInterval(() => {
   readyRetries += 1

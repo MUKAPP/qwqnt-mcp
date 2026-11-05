@@ -18,6 +18,8 @@ import {
   type PageService,
 } from './page-service'
 import { normalizeValue, type ValueType } from '../shared/serialize'
+import { version as PLUGIN_VERSION } from '../../package.json'
+import { isToolErrorCode, ToolError, type ToolErrorCode } from './tool-error'
 
 const DEFAULT_JS_TIMEOUT_MS = 10_000
 const MIN_JS_TIMEOUT_MS = 100
@@ -102,17 +104,6 @@ const normalizedIpcResultSchema = z.object({
 })
 
 
-type ToolErrorCode =
-  | 'PAGE_NOT_FOUND'
-  | 'ELEMENT_NOT_FOUND'
-  | 'TIMEOUT'
-  | 'PAGE_NOT_READY'
-  | 'INVALID_ARGUMENT'
-  | 'OUTPUT_LIMIT'
-  | 'SCRIPT_ERROR'
-  | 'IPC_ERROR'
-  | 'INTERNAL_ERROR'
-
 interface ToolErrorInfo {
   code: ToolErrorCode
   message: string
@@ -120,44 +111,11 @@ interface ToolErrorInfo {
 }
 
 function classifyToolError(error: unknown): ToolErrorInfo {
+  if (error instanceof ToolError) {
+    return { code: error.code, message: error.message, retryable: error.retryable }
+  }
   const rawMessage = error instanceof Error ? error.message : String(error)
-  if (rawMessage.startsWith('未找到页面：')) {
-    return { code: 'PAGE_NOT_FOUND', message: rawMessage, retryable: false }
-  }
-  if (rawMessage.startsWith('页面中未找到选择器：')) {
-    return { code: 'ELEMENT_NOT_FOUND', message: rawMessage, retryable: false }
-  }
-  if (rawMessage.startsWith('操作超时（')) {
-    return { code: 'TIMEOUT', message: rawMessage, retryable: true }
-  }
-  if (rawMessage.startsWith('目标页面尚未加载')) {
-    return { code: 'PAGE_NOT_READY', message: rawMessage, retryable: true }
-  }
-  if (
-    rawMessage.startsWith('channel 不能为空') ||
-    rawMessage.startsWith('channel 超过长度限制') ||
-    rawMessage.startsWith('拒绝使用保留通道：') ||
-    rawMessage.startsWith('IPC 参数无法') ||
-    rawMessage.startsWith('IPC 参数不能超过') ||
-    rawMessage.startsWith('IPC 参数超过大小限制') ||
-    rawMessage.startsWith('截图区域无效') ||
-    rawMessage.startsWith('截图区域像素数不能超过') ||
-    rawMessage.startsWith('截图结果超过大小限制') ||
-    rawMessage.startsWith('等待条件无效') ||
-    rawMessage.startsWith('目标元素不可编辑')
-  ) {
-    return { code: 'INVALID_ARGUMENT', message: rawMessage, retryable: false }
-  }
-  if (rawMessage.startsWith('工具响应超过大小限制：')) {
-    return { code: 'OUTPUT_LIMIT', message: rawMessage, retryable: false }
-  }
-  if (rawMessage.startsWith('页面脚本结果无效') || rawMessage.includes('SyntaxError')) {
-    return { code: 'SCRIPT_ERROR', message: rawMessage, retryable: false }
-  }
-  if (rawMessage.startsWith('IPC 调用失败')) {
-    return { code: 'IPC_ERROR', message: rawMessage, retryable: true }
-  }
-  return { code: 'INTERNAL_ERROR', message: '工具执行失败', retryable: false }
+  return { code: 'INTERNAL_ERROR', message: `工具执行失败：${rawMessage}`, retryable: false }
 }
 
 export function toolError(error: unknown): CallToolResult {
@@ -177,7 +135,7 @@ export function toolError(error: unknown): CallToolResult {
 function successResult(structuredContent: Record<string, unknown>): CallToolResult {
   const text = JSON.stringify(structuredContent)
   if (Buffer.byteLength(text, 'utf8') > MAX_TOOL_RESPONSE_BYTES) {
-    throw new Error(`工具响应超过大小限制：${MAX_TOOL_RESPONSE_BYTES} bytes`)
+    throw new ToolError('OUTPUT_LIMIT', `工具响应超过大小限制：${MAX_TOOL_RESPONSE_BYTES} bytes`)
   }
   return {
     content: [{ type: 'text', text }],
@@ -188,7 +146,7 @@ function successResult(structuredContent: Record<string, unknown>): CallToolResu
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   const { promise: timed, resolve, reject } = Promise.withResolvers<T>()
   const timer = setTimeout(() => {
-    reject(new Error(`操作超时（${timeoutMs} ms）`))
+    reject(new ToolError('TIMEOUT', `操作超时（${timeoutMs} ms）`))
   }, timeoutMs)
   promise.then(
     (value) => {
@@ -213,8 +171,65 @@ function throwIfPageScriptError(raw: unknown): void {
   if (raw && typeof raw === 'object' && '__qwqntMcpError' in raw) {
     const message = raw.__qwqntMcpError
     if (typeof message === 'string') {
-      throw new Error(message)
+      const code = '__qwqntMcpErrorCode' in raw ? raw.__qwqntMcpErrorCode : undefined
+      throw new ToolError(isToolErrorCode(code) ? code : 'SCRIPT_ERROR', message)
     }
+  }
+}
+
+/** 调用 executeJavaScript；页面包装器之外的失败（如渲染进程崩溃）保留原始消息 */
+async function executePageScript(
+  win: ReturnType<PageService['requirePage']>,
+  script: string,
+  timeoutMs: number,
+  userGesture = false,
+): Promise<unknown> {
+  const raw = await withTimeout(
+    win.webContents.executeJavaScript(script, userGesture).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ToolError('SCRIPT_ERROR', `页面脚本执行失败：${message}`)
+    }),
+    timeoutMs,
+  )
+  throwIfPageScriptError(raw)
+  return raw
+}
+
+/** 解包页面内归一化结果；非包装结果（旧页面脚本或测试替身）在主进程侧归一化 */
+function unwrapNormalizedValue(raw: unknown): { valueType: ValueType; value: unknown } {
+  if (raw && typeof raw === 'object' && '__qwqntMcpValueType' in raw && '__qwqntMcpValue' in raw) {
+    const parsed = valueTypeSchema.safeParse(raw.__qwqntMcpValueType)
+    if (parsed.success) {
+      return { valueType: parsed.data, value: raw.__qwqntMcpValue }
+    }
+  }
+  const normalized = normalizeValue(raw)
+  return { valueType: normalized.valueType, value: normalized.value }
+}
+
+/** 同一页面的写操作队列：由 HTTP 服务创建一次，所有 MCP 请求共享 */
+export interface PageOperationQueue {
+  run<T>(pageId: number, operation: () => Promise<T>): Promise<T>
+}
+
+export function createPageOperationQueue(): PageOperationQueue {
+  const tails = new Map<number, Promise<void>>()
+  return {
+    async run<T>(pageId: number, operation: () => Promise<T>): Promise<T> {
+      const previous = tails.get(pageId) ?? Promise.resolve()
+      const { promise: current, resolve: release } = Promise.withResolvers<void>()
+      const tail = previous.then(() => current)
+      tails.set(pageId, tail)
+      await previous
+      try {
+        return await operation()
+      } finally {
+        release()
+        if (tails.get(pageId) === tail) {
+          tails.delete(pageId)
+        }
+      }
+    },
   }
 }
 
@@ -226,45 +241,26 @@ async function runPageScript(
   userGesture = false,
 ): Promise<unknown> {
   const win = pageService.requirePage(pageId)
-  const raw = await withTimeout(
-    win.webContents.executeJavaScript(script, userGesture),
-    timeoutMs,
-  )
-  throwIfPageScriptError(raw)
-  return raw
+  return executePageScript(win, script, timeoutMs, userGesture)
 }
 
-export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge): McpServer {
+export function createMcpServer(
+  pageService: PageService,
+  ipcBridge: IpcBridge,
+  operationQueue: PageOperationQueue,
+): McpServer {
   const server = new McpServer(
     {
       name: 'qwqnt-mcp',
-      version: '0.1.0',
+      version: PLUGIN_VERSION,
     },
     {
       instructions:
         QQ_PAGE_SCOPE + ' 本服务专门用于检查和操作 QQ 桌面客户端页面。仅在任务目标为 QQ 时使用；不要为寻找普通浏览器或其他应用的页面而调用 list_pages。遇到 QQ 窗口、页面 DOM、截图、元素交互、页面网络/控制台日志或 IPC 调试任务时，优先使用本服务提供的工具，不要先使用通用浏览器或网页搜索工具。开始任务时如果尚未知道 pageId，先调用 list_pages；读取页面状态优先使用 get_page_html、query_selector、get_console_logs、list_network，只有没有专用工具时才使用 execute_javascript。执行点击、输入、键盘操作或 IPC 前先确认目标页面和参数。',
     },
   )
-  const pageOperationTails = new Map<number, Promise<void>>()
-
-  async function withPageOperation<T>(pageId: number, operation: () => Promise<T>): Promise<T> {
-    const previous = pageOperationTails.get(pageId) ?? Promise.resolve()
-    let release!: () => void
-    const current = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    const tail = previous.then(() => current)
-    pageOperationTails.set(pageId, tail)
-    await previous
-    try {
-      return await operation()
-    } finally {
-      release()
-      if (pageOperationTails.get(pageId) === tail) {
-        pageOperationTails.delete(pageId)
-      }
-    }
-  }
+  const withPageOperation = <T>(pageId: number, operation: () => Promise<T>): Promise<T> =>
+    operationQueue.run(pageId, operation)
 
   server.registerTool(
     'list_pages',
@@ -319,13 +315,9 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
         const win = pageService.requirePage(pageId)
         const includeShadow = includeShadowDom !== false
         const script = buildSerializeHtmlScript(selector, includeShadow)
-        const raw = await withTimeout(
-          win.webContents.executeJavaScript(script, false),
-          timeoutMs ?? DEFAULT_JS_TIMEOUT_MS,
-        )
-        throwIfPageScriptError(raw)
+        const raw = await executePageScript(win, script, timeoutMs ?? DEFAULT_JS_TIMEOUT_MS)
         if (typeof raw !== 'string') {
-          throw new Error('页面 HTML 序列化结果无效')
+          throw new ToolError('SCRIPT_ERROR', '页面 HTML 序列化结果无效')
         }
         let url = ''
         try {
@@ -384,7 +376,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
             height > MAX_CAPTURE_HEIGHT ||
             width * height > MAX_CAPTURE_PIXELS
           ) {
-            throw new Error('截图区域无效')
+            throw new ToolError('INVALID_ARGUMENT', '截图区域无效')
           }
           captureRect = { x, y, width, height }
         }
@@ -394,14 +386,14 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
           timeoutMs ?? DEFAULT_JS_TIMEOUT_MS,
         )
         if (!image || image.isEmpty()) {
-          throw new Error('截图结果为空')
+          throw new ToolError('INTERNAL_ERROR', '截图结果为空')
         }
         const png = image.toPNG()
         if (!png || png.length === 0) {
-          throw new Error('截图结果为空')
+          throw new ToolError('INTERNAL_ERROR', '截图结果为空')
         }
         if (png.length > MAX_CAPTURE_BYTES) {
-          throw new Error(`截图结果超过大小限制：${MAX_CAPTURE_BYTES} bytes`)
+          throw new ToolError('OUTPUT_LIMIT', `截图结果超过大小限制：${MAX_CAPTURE_BYTES} bytes`)
         }
         const size = image.getSize()
         let url = ''
@@ -631,7 +623,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
     async ({ pageId, selector, visible, urlIncludes, expression, timeoutMs }) => {
       try {
         if (!selector && !urlIncludes && !expression) {
-          throw new Error('等待条件无效：请提供 selector、urlIncludes 或 expression 之一')
+          throw new ToolError('INVALID_ARGUMENT', '等待条件无效：请提供 selector、urlIncludes 或 expression 之一')
         }
         const win = pageService.requirePage(pageId)
         const timeout = timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
@@ -644,8 +636,9 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
         const started = Date.now()
         while (Date.now() - started <= timeout) {
           const remaining = timeout - (Date.now() - started)
-          const ok = await withTimeout(
-            win.webContents.executeJavaScript(script, false),
+          const ok = await executePageScript(
+            win,
+            script,
             Math.min(Math.max(remaining, 1), MAX_JS_TIMEOUT_MS),
           )
           if (ok === true) {
@@ -658,7 +651,7 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
           const sleepMs = Math.min(WAIT_POLL_MS, timeout - (Date.now() - started))
           if (sleepMs > 0) await sleep(sleepMs)
         }
-        throw new Error(`操作超时（${timeout} ms）`)
+        throw new ToolError('TIMEOUT', `操作超时（${timeout} ms）`)
       } catch (error) {
         return toolError(error)
       }
@@ -804,10 +797,10 @@ export function createMcpServer(pageService: PageService, ipcBridge: IpcBridge):
             false,
           ),
         )
-        const normalized = normalizeValue(raw)
+        const normalized = unwrapNormalizedValue(raw)
         return successResult({
           pageId,
-          valueType: normalized.valueType as ValueType,
+          valueType: normalized.valueType,
           value: normalized.value,
         })
       } catch (error) {
